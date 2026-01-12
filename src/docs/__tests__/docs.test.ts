@@ -55,7 +55,10 @@ describe("Docs Module", () => {
       };
 
       const filename = generateFilename(analysis, 100, "api-docs");
-      const slug = filename.split("-").slice(4).join("-").replace(".md", "");
+      // The filename format is: ${date}-pr-${prNumber}-${template}-${slug}.md
+      // Extract the slug by removing the known prefix and .md suffix
+      const prefix = "2024-01-15-pr-100-api-docs-";
+      const slug = filename.replace(prefix, "").replace(".md", "");
 
       expect(slug.length).toBeLessThanOrEqual(50);
     });

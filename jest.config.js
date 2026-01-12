@@ -25,6 +25,9 @@ module.exports = {
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
       useESM: false,
+      diagnostics: {
+        ignoreCodes: [151002],
+      },
     }],
   },
   clearMocks: true,
