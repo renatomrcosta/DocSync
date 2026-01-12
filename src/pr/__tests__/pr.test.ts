@@ -5,10 +5,16 @@ import {
   generatePRDescription,
   GitHubAPIClient,
 } from "../index";
+import { PRCreationError } from "../../errors/index";
 
 // Mock global fetch
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
+
+// Mock console for logger
+jest.spyOn(console, "info").mockImplementation();
+jest.spyOn(console, "warn").mockImplementation();
+jest.spyOn(console, "error").mockImplementation();
 
 describe("PR Module", () => {
   beforeEach(() => {
@@ -21,6 +27,13 @@ describe("PR Module", () => {
 
       expect(client.token).toBe("test-token");
       expect(client.baseUrl).toBe("https://api.github.com");
+      expect(client.maxRetries).toBe(3);
+    });
+
+    it("should create client with custom maxRetries", () => {
+      const client = createGitHubClient("test-token", 5);
+
+      expect(client.maxRetries).toBe(5);
     });
   });
 
@@ -28,6 +41,7 @@ describe("PR Module", () => {
     const client: GitHubAPIClient = {
       token: "test-token",
       baseUrl: "https://api.github.com",
+      maxRetries: 0, // No retries for tests
     };
 
     it("should create PR with correct API call", async () => {
@@ -73,9 +87,10 @@ describe("PR Module", () => {
       expect(result.title).toBe("Test PR");
     });
 
-    it("should throw error on failed API call", async () => {
+    it("should throw PRCreationError on failed API call", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
+        status: 422,
         text: () => Promise.resolve("Validation Failed"),
       });
 
@@ -88,7 +103,7 @@ describe("PR Module", () => {
           head: "head",
           base: "base",
         })
-      ).rejects.toThrow("Failed to create PR: Validation Failed");
+      ).rejects.toThrow(PRCreationError);
     });
 
     it("should add reviewers when provided", async () => {
@@ -156,6 +171,7 @@ describe("PR Module", () => {
     const client: GitHubAPIClient = {
       token: "test-token",
       baseUrl: "https://api.github.com",
+      maxRetries: 0,
     };
 
     it("should call API with correct parameters", async () => {
@@ -177,19 +193,16 @@ describe("PR Module", () => {
       );
     });
 
-    it("should log error on failed API call but not throw", async () => {
-      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+    it("should throw PRCreationError on failed API call", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
+        status: 404,
         text: () => Promise.resolve("User not found"),
       });
 
-      await addReviewers(client, "owner", "repo", 42, ["nonexistent"]);
-
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to add reviewers: User not found"
-      );
-      consoleSpy.mockRestore();
+      await expect(
+        addReviewers(client, "owner", "repo", 42, ["nonexistent"])
+      ).rejects.toThrow(PRCreationError);
     });
   });
 

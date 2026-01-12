@@ -1,3 +1,5 @@
+import { PRCreationError, withRetry, logger } from "../errors/index.js";
+
 export interface PRCreationOptions {
   owner: string;
   repo: string;
@@ -17,6 +19,7 @@ export interface CreatedPR {
 export interface GitHubAPIClient {
   token: string;
   baseUrl: string;
+  maxRetries: number;
 }
 
 interface GitHubPRResponse {
@@ -25,10 +28,11 @@ interface GitHubPRResponse {
   title: string;
 }
 
-export function createGitHubClient(token: string): GitHubAPIClient {
+export function createGitHubClient(token: string, maxRetries?: number): GitHubAPIClient {
   return {
     token,
     baseUrl: "https://api.github.com",
+    maxRetries: maxRetries ?? 3,
   };
 }
 
@@ -38,35 +42,71 @@ export async function createPullRequest(
 ): Promise<CreatedPR> {
   const { owner, repo, title, body, head, base } = options;
 
-  const response = await fetch(
-    `${client.baseUrl}/repos/${owner}/${repo}/pulls`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${client.token}`,
-        Accept: "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ title, body, head, base }),
-    }
+  logger.info("Creating pull request", { owner, repo, title, head, base });
+
+  return withRetry(
+    async () => {
+      try {
+        const response = await fetch(
+          `${client.baseUrl}/repos/${owner}/${repo}/pulls`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${client.token}`,
+              Accept: "application/vnd.github.v3+json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ title, body, head, base }),
+          }
+        );
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new PRCreationError(
+            `Failed to create PR: ${errorText}`,
+            {
+              owner,
+              repo,
+              statusCode: response.status,
+              head,
+              base,
+            }
+          );
+        }
+
+        const data = (await response.json()) as GitHubPRResponse;
+
+        if (options.reviewers && options.reviewers.length > 0) {
+          await addReviewers(client, owner, repo, data.number, options.reviewers);
+        }
+
+        logger.info("Pull request created successfully", {
+          owner,
+          repo,
+          prNumber: data.number,
+          url: data.html_url,
+        });
+
+        return {
+          number: data.number,
+          url: data.html_url,
+          title: data.title,
+        };
+      } catch (error) {
+        if (error instanceof PRCreationError) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        throw new PRCreationError(`Failed to create PR: ${message}`, {
+          owner,
+          repo,
+          head,
+          base,
+        });
+      }
+    },
+    { maxRetries: client.maxRetries }
   );
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to create PR: ${error}`);
-  }
-
-  const data = (await response.json()) as GitHubPRResponse;
-
-  if (options.reviewers && options.reviewers.length > 0) {
-    await addReviewers(client, owner, repo, data.number, options.reviewers);
-  }
-
-  return {
-    number: data.number,
-    url: data.html_url,
-    title: data.title,
-  };
 }
 
 export async function addReviewers(
@@ -76,23 +116,54 @@ export async function addReviewers(
   prNumber: number,
   reviewers: string[]
 ): Promise<void> {
-  const response = await fetch(
-    `${client.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/requested_reviewers`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${client.token}`,
-        Accept: "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ reviewers }),
-    }
-  );
+  logger.info("Adding reviewers to PR", { owner, repo, prNumber, reviewers });
 
-  if (!response.ok) {
-    const error = await response.text();
-    console.error(`Failed to add reviewers: ${error}`);
-  }
+  return withRetry(
+    async () => {
+      try {
+        const response = await fetch(
+          `${client.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/requested_reviewers`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${client.token}`,
+              Accept: "application/vnd.github.v3+json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ reviewers }),
+          }
+        );
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new PRCreationError(
+            `Failed to add reviewers: ${errorText}`,
+            {
+              owner,
+              repo,
+              prNumber,
+              reviewers,
+              statusCode: response.status,
+            }
+          );
+        }
+
+        logger.info("Reviewers added successfully", { owner, repo, prNumber, reviewers });
+      } catch (error) {
+        if (error instanceof PRCreationError) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        throw new PRCreationError(`Failed to add reviewers: ${message}`, {
+          owner,
+          repo,
+          prNumber,
+          reviewers,
+        });
+      }
+    },
+    { maxRetries: client.maxRetries }
+  );
 }
 
 export function generatePRDescription(
