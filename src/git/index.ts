@@ -50,7 +50,8 @@ export class GitClient {
     headSha: string
   ): Promise<DiffResult> {
     const diff = await git.diff([baseSha, headSha, "--stat"]);
-    const diffPatch = await git.diff([baseSha, headSha]);
+    // Note: diffPatch can be used in future for full patch content
+    await git.diff([baseSha, headSha]);
 
     const lines = diff.split("\n").filter((line) => line.trim());
     const files: DiffResult["files"] = [];
@@ -58,7 +59,7 @@ export class GitClient {
     for (const line of lines) {
       const match = line.match(/^\s*(.+?)\s*\|\s*(\d+)\s*([+-]+)/);
       if (match) {
-        const [, filePath, changes, indicators] = match;
+        const [, filePath, _changes, indicators] = match;
         const additions = (indicators.match(/\+/g) || []).length;
         const deletions = (indicators.match(/-/g) || []).length;
         files.push({

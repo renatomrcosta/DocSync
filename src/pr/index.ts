@@ -19,6 +19,12 @@ export interface GitHubAPIClient {
   baseUrl: string;
 }
 
+interface GitHubPRResponse {
+  number: number;
+  html_url: string;
+  title: string;
+}
+
 export function createGitHubClient(token: string): GitHubAPIClient {
   return {
     token,
@@ -50,7 +56,7 @@ export async function createPullRequest(
     throw new Error(`Failed to create PR: ${error}`);
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as GitHubPRResponse;
 
   if (options.reviewers && options.reviewers.length > 0) {
     await addReviewers(client, owner, repo, data.number, options.reviewers);
