@@ -1,10 +1,12 @@
 import express from "express";
+import fs from "fs/promises";
+import path from "path";
 import { loadConfig } from "./config/index.js";
 import { createWebhookRouter, PullRequestEvent } from "./webhook/index.js";
 import { GitClient } from "./git/index.js";
 import { createLLMClient } from "./llm/index.js";
-import { templates, generateFilename, renderTemplate } from "./docs/index.js";
-import { createGitHubClient, createPullRequest, generatePRDescription } from "./pr/index.js";
+import { createGitHubClient, createPullRequest } from "./pr/index.js";
+import { createOnboardRouter } from "./onboard/index.js";
 
 async function main() {
   const config = loadConfig();
@@ -16,6 +18,7 @@ async function main() {
   const handleWebhook = async (event: PullRequestEvent) => {
     console.log(`Processing PR #${event.pullRequest.number} from ${event.repository.fullName}`);
 
+    // Clone source repository and get the diff
     const { git } = await gitClient.clone({
       owner: event.repository.owner,
       repo: event.repository.name,
@@ -31,51 +34,98 @@ async function main() {
       diff.files.map((f) => f.patch).join("\n")
     );
 
-    const docContent = renderTemplate(templates.changeSummary.content, {
-      title: event.pullRequest.title,
-      date: new Date().toISOString(),
-      prNumber: event.pullRequest.number,
-      author: event.pullRequest.author,
-      summary: analysis.summary,
-      prUrl: `https://github.com/${event.repository.fullName}/pull/${event.pullRequest.number}`,
-    });
-
-    const filename = generateFilename(
-      analysis,
-      event.pullRequest.number,
-      "change-summary"
-    );
-
-    const { git: docsGit } = await gitClient.clone({
+    // Clone docs repository
+    const { git: docsGit, path: docsPath } = await gitClient.clone({
       owner: config.docsRepository.owner,
       repo: config.docsRepository.repo,
     });
 
-    const branchName = `docs/pr-${event.pullRequest.number}`;
+    // Check if documentation exists for this repository
+    const docFilename = `${event.repository.name}.md`;
+    const docFilePath = path.join(docsPath, "docs", docFilename);
+
+    let existingDocs: string | null = null;
+    try {
+      existingDocs = await fs.readFile(docFilePath, "utf-8");
+    } catch {
+      // Documentation doesn't exist yet
+      console.log(`No existing documentation found for ${event.repository.fullName}. Consider running onboarding first.`);
+    }
+
+    let updatedContent: string;
+    let commitMessage: string;
+
+    if (existingDocs) {
+      // Update existing documentation
+      updatedContent = await llmClient.updateDocumentation(existingDocs, analysis, {
+        number: event.pullRequest.number,
+        title: event.pullRequest.title,
+        author: event.pullRequest.author,
+      });
+      commitMessage = `docs: Update ${event.repository.name} documentation for PR #${event.pullRequest.number}`;
+    } else {
+      // No existing docs - create minimal update notice
+      const date = new Date().toISOString().split("T")[0];
+      updatedContent = `---
+title: ${event.repository.name} Documentation
+date: ${date}
+repository: ${event.repository.fullName}
+---
+
+# ${event.repository.name}
+
+> This documentation was auto-generated. Run the onboarding process for comprehensive documentation.
+
+## Recent Changes
+
+### PR #${event.pullRequest.number}: ${event.pullRequest.title}
+
+**Author:** ${event.pullRequest.author}
+**Date:** ${date}
+
+${analysis.summary}
+
+### Changes
+
+${analysis.changes.map((c) => `- **${c.component}** (${c.type}): ${c.description}`).join("\n")}
+`;
+      commitMessage = `docs: Add initial documentation for ${event.repository.name} from PR #${event.pullRequest.number}`;
+    }
+
+    // Create branch and write updated documentation
+    const branchName = `docs/update-${event.repository.name}-pr-${event.pullRequest.number}`;
     await gitClient.createBranch(docsGit, branchName);
 
-    const fs = await import("fs/promises");
-    const path = await import("path");
-    const repoPath = (await docsGit.revparse(["--show-toplevel"])).trim();
-    await fs.writeFile(path.join(repoPath, "docs", filename), docContent);
+    // Ensure docs directory exists
+    await fs.mkdir(path.join(docsPath, "docs"), { recursive: true });
+    await fs.writeFile(docFilePath, updatedContent);
 
-    await gitClient.commitAndPush(docsGit, `docs: add documentation for PR #${event.pullRequest.number}`, [
-      `docs/${filename}`,
-    ]);
+    await gitClient.commitAndPush(docsGit, commitMessage, [`docs/${docFilename}`]);
+
+    // Create PR
+    const prBody = `## Documentation Update
+
+This PR updates the documentation for **${event.repository.fullName}** based on [PR #${event.pullRequest.number}](https://github.com/${event.repository.fullName}/pull/${event.pullRequest.number}).
+
+### Summary
+
+${analysis.summary}
+
+### Changes
+
+${analysis.changes.map((c) => `- **${c.component}** (${c.type}, ${c.impact} impact): ${c.description}`).join("\n")}
+
+${analysis.architecturalChanges ? "**Note:** This PR includes architectural changes that may affect diagrams." : ""}
+
+---
+*Generated by DocSync*
+`;
 
     const pr = await createPullRequest(githubClient, {
       owner: config.docsRepository.owner,
       repo: config.docsRepository.repo,
-      title: `docs: Update documentation for PR #${event.pullRequest.number}`,
-      body: generatePRDescription(
-        {
-          number: event.pullRequest.number,
-          title: event.pullRequest.title,
-          url: `https://github.com/${event.repository.fullName}/pull/${event.pullRequest.number}`,
-        },
-        [filename],
-        analysis.summary
-      ),
+      title: `docs: Update ${event.repository.name} documentation for PR #${event.pullRequest.number}`,
+      body: prBody,
       head: branchName,
       base: config.docsRepository.branch,
       reviewers: [event.pullRequest.author],
@@ -86,6 +136,14 @@ async function main() {
 
   const app = express();
   app.use(createWebhookRouter(config.webhookSecret, handleWebhook));
+  app.use(
+    createOnboardRouter({
+      gitClient,
+      llmClient,
+      githubClient,
+      docsRepository: config.docsRepository,
+    })
+  );
 
   app.get("/health", (_, res) => {
     res.json({ status: "ok" });
