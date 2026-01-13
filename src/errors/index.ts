@@ -47,6 +47,13 @@ export class WebhookValidationError extends DocSyncError {
   }
 }
 
+export class SlackNotificationError extends DocSyncError {
+  constructor(message: string, context?: Record<string, unknown>) {
+    super(message, "SLACK_NOTIFICATION_ERROR", true, context);
+    this.name = "SlackNotificationError";
+  }
+}
+
 /**
  * Retry configuration options
  */
