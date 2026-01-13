@@ -7,6 +7,8 @@ import { GitClient } from "./git/index.js";
 import { createLLMClient } from "./llm/index.js";
 import { createGitHubClient, createPullRequest } from "./pr/index.js";
 import { createOnboardRouter } from "./onboard/index.js";
+import { createSlackClient, sendNotification } from "./slack/index.js";
+import { logger } from "./errors/index.js";
 
 async function main() {
   const config = loadConfig();
@@ -132,6 +134,39 @@ ${analysis.architecturalChanges ? "**Note:** This PR includes architectural chan
     });
 
     console.log(`Created documentation PR: ${pr.url}`);
+
+    // Send Slack notification if enabled
+    if (config.slack?.enabled && config.slack.webhookUrl) {
+      try {
+        const slackClient = createSlackClient(config.slack.webhookUrl, {
+          channel: config.slack.channel,
+        });
+
+        await sendNotification(slackClient, {
+          docsPR: {
+            number: pr.number,
+            url: pr.url,
+            title: pr.title,
+          },
+          sourcePR: {
+            number: event.pullRequest.number,
+            url: `https://github.com/${event.repository.fullName}/pull/${event.pullRequest.number}`,
+            title: event.pullRequest.title,
+            repository: event.repository.fullName,
+          },
+          summary: analysis.summary,
+          filesChanged: [`docs/${docFilename}`],
+          reviewers: [event.pullRequest.author],
+        });
+
+        logger.info("Slack notification sent successfully", { prNumber: pr.number });
+      } catch (error) {
+        // Log error but don't fail the webhook - Slack notification is non-critical
+        logger.error("Failed to send Slack notification", error, {
+          prNumber: pr.number,
+        });
+      }
+    }
   };
 
   const app = express();
